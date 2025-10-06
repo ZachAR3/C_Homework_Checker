@@ -35,14 +35,14 @@ class CGrader:
         self.report = {
             "total_deduction": 0,
             "details": [],
-            "test_report": None
+            "test_report": None,
+            "compile_status": None
         }
         self.lines = []
         try:
             with open(self.c_file, 'r', encoding='utf-8', errors='ignore') as f:
                 self.lines = f.readlines()
-            # Check for non-ascii characters by trying to encode with 'ascii'
-            ''.join(self.lines).encode('ascii')
+            ''.join(self.lines).encode('ascii')  # check for non-ASCII
         except UnicodeEncodeError:
             self._add_deduction("non_ascii")
         except Exception as e:
@@ -65,11 +65,14 @@ class CGrader:
         self._check_comments()
         self._check_memory()
         compile_status = self._check_compilation()
+        self.report["compile_status"] = compile_status
 
-        if compile_status == "success":
-            self._check_runtime()
+        # ✅ Run tests even if there were warnings
+        if compile_status in ("success", "warnings"):
             if test_cases_file:
                 self._run_test_cases(test_cases_file)
+            else:
+                self._check_runtime()
 
         self._cleanup()
         return self.report
@@ -108,7 +111,7 @@ class CGrader:
     def _check_compilation(self):
         """Tries to compile the C code and captures errors/warnings."""
         try:
-            command = ["gcc", "-Wall", "-Wextra", "-pedantic", self.c_file, "-o", self.executable_file, "-lm"]
+            command = ["gcc", "-Wall", self.c_file, "-o", self.executable_file, "-lm"]
             result = subprocess.run(command, capture_output=True, text=True, timeout=10)
             if result.returncode != 0:
                 self._add_deduction("does_not_compile", f"\n--- Compiler Output ---\n{result.stderr}")
@@ -125,7 +128,7 @@ class CGrader:
             return "fail"
 
     def _check_runtime(self):
-        """Runs the compiled executable to check for runtime errors like segfaults."""
+        """Runs the compiled executable to check for runtime errors."""
         if not os.path.exists(self.executable_file):
             return
         try:
@@ -136,7 +139,7 @@ class CGrader:
             self._add_deduction("segmentation_fault", "(program timed out during execution)")
 
     def _check_memory(self):
-        """Performs basic checks for memory management best practices."""
+        """Basic checks for memory usage patterns."""
         content = "".join(self.lines)
         allocs = len(re.findall(r'\bmalloc\b|\bcalloc\b|\brealloc\b', content))
         frees = len(re.findall(r'\bfree\b', content))
@@ -146,13 +149,15 @@ class CGrader:
         alloc_lines = [i for i, line in enumerate(self.lines) if "malloc" in line or "calloc" in line]
         for line_num in alloc_lines:
             match = re.search(r'(\w+)\s*=\s*\(.*?\*\s*\)\s*(?:malloc|calloc)', self.lines[line_num])
-            if not match: continue
+            if not match:
+                continue
             var_name = match.group(1)
             found_check = False
             for i in range(line_num + 1, min(line_num + 6, len(self.lines))):
                 line = self.lines[i]
-                if line.strip() == "": continue
-                if f"if" in line and (f"{var_name} == NULL" in line or f"!{var_name}" in line):
+                if line.strip() == "":
+                    continue
+                if "if" in line and (f"{var_name} == NULL" in line or f"!{var_name}" in line):
                     found_check = True
                     break
             if not found_check:
@@ -162,7 +167,7 @@ class CGrader:
         """Loads and runs the test cases from the specified module."""
         if not os.path.exists(self.executable_file):
             return
-        
+
         module_name = os.path.splitext(test_cases_file)[0]
         try:
             spec = importlib.util.spec_from_file_location(module_name, test_cases_file)
@@ -177,10 +182,22 @@ class CGrader:
                 if any(not r['passed'] for r in test_results):
                     self._add_deduction("failed_tests")
             else:
-                 self.report["test_report"] = [{"name": "Error", "passed": False, "reason": "Could not find 'TestRunner' class in the test case file.", "expected": "", "received": ""}]
+                self.report["test_report"] = [{
+                    "name": "Error",
+                    "passed": False,
+                    "reason": "Could not find 'TestRunner' class in the test case file.",
+                    "expected": "",
+                    "received": ""
+                }]
 
         except Exception as e:
-            self.report["test_report"] = [{"name": "Error", "passed": False, "reason": f"Failed to load or run test cases: {e}", "expected": "", "received": ""}]
+            self.report["test_report"] = [{
+                "name": "Error",
+                "passed": False,
+                "reason": f"Failed to load or run test cases: {e}",
+                "expected": "",
+                "received": ""
+            }]
 
     def _cleanup(self):
         """Removes the temporary executable file."""
@@ -188,20 +205,21 @@ class CGrader:
             os.remove(self.executable_file)
 
 def print_report(report, c_file):
-    """Prints a formatted report."""
+    """Prints a formatted grading report."""
     print(f"--- Analyzing {c_file} ---\n")
     if not report["details"] and (not report["test_report"] or all(r.get('passed', False) for r in report["test_report"])):
         print("✅ No issues found by the automated checker.")
-    
+
     print("--- Grading Report ---")
-    print(f"Initial Score: 100")
+    print("Initial Score: 100")
     for item in report["details"]:
         print(f"  - {item['points']:<5} | {item['message']}")
 
     if report["test_report"]:
         passed_count = sum(1 for r in report["test_report"] if r.get('passed', False))
         total_count = len(report["test_report"])
-        print("\n--- Test Case Results ---")
+        status_symbol = "⚠️ " if report.get("compile_status") == "warnings" else ""
+        print(f"\n--- Test Case Results {status_symbol}---")
         print(f"Summary: {passed_count} / {total_count} tests passed.")
         for res in report["test_report"]:
             if res.get('passed', False):
@@ -235,4 +253,3 @@ if __name__ == "__main__":
         print(e)
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
-
